@@ -3,6 +3,8 @@ package com.lingbo.ojcodesandbox;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.io.resource.ResourceUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.dfa.FoundWord;
+import cn.hutool.dfa.WordTree;
 import com.lingbo.ojcodesandbox.model.ExecuteCodeRequest;
 import com.lingbo.ojcodesandbox.model.ExecuteCodeResponse;
 import com.lingbo.ojcodesandbox.model.ExecuteMessage;
@@ -27,6 +29,18 @@ public class JavaNativeCodeSandbox implements CodeSandbox {
 
     private static final String GLOBAL_JAVA_CLASS_NAME = "Main.java";
 
+    private static final Long TIME_OUT = 10000L;
+
+    private static final List<String> blackList = Arrays.asList("Files", "exec");
+
+    private static final WordTree WORD_TREE;
+
+    static {
+        // 初始化字典树
+        WORD_TREE = new WordTree();
+        WORD_TREE.addWords(blackList);
+    }
+
     public static void main(String[] args) {
         JavaNativeCodeSandbox codeSandbox = new JavaNativeCodeSandbox();
         String code = ResourceUtil.readStr("testcode/simpleComputeArgs/Main.java", StandardCharsets.UTF_8);
@@ -45,6 +59,12 @@ public class JavaNativeCodeSandbox implements CodeSandbox {
         // 1. 保存用户代码文件
         String code = executeCodeRequest.getCode();
         List<String> inputList = executeCodeRequest.getInputList();
+        // 校验代码中是否包含黑名单中的禁用词
+        FoundWord foundWord = WORD_TREE.matchWord(code);
+        if (foundWord != null) {
+            System.out.println("包含禁止词：" + foundWord.getFoundWord());
+            return null;
+        }
 
 
         String userDir = System.getProperty("user.dir");
@@ -76,9 +96,19 @@ public class JavaNativeCodeSandbox implements CodeSandbox {
         long maxTime = 0;
         for (String inputArgs : inputList) {
 
-            String runCmd = String.format("java -Dfile.encoding=UTF-8 -cp %s Main %s", userCodeSaveParentPath, inputArgs);
+            String runCmd = String.format("java -Xmx256m -Dfile.encoding=UTF-8 -cp %s Main %s", userCodeSaveParentPath, inputArgs);
             try {
                 Process runProcess = Runtime.getRuntime().exec(runCmd);
+                // 超时控制
+                new Thread(()->{
+                    try {
+                        Thread.sleep(TIME_OUT);
+                        System.out.println("超时了，中断");
+                        runProcess.destroy();
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                }).start();
                 ExecuteMessage executeMessage = ProcessUtils.runProcessAndGetMessage(runProcess, "运行");
                 System.out.println(executeMessage);
                 executeMessageList.add(executeMessage);
