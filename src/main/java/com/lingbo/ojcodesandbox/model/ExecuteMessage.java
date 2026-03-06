@@ -10,4 +10,6 @@ public class ExecuteMessage {
     private String errorMessage;
 
     private Integer exitCode;
+
+    private Long time;
 }
