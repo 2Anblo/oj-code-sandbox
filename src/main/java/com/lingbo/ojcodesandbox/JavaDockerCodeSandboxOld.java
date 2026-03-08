@@ -1,7 +1,9 @@
 package com.lingbo.ojcodesandbox;
 
+import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.io.resource.ResourceUtil;
 import cn.hutool.core.util.ArrayUtil;
+import cn.hutool.core.util.StrUtil;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.*;
@@ -11,7 +13,8 @@ import com.github.dockerjava.core.command.ExecStartResultCallback;
 import com.lingbo.ojcodesandbox.model.ExecuteCodeRequest;
 import com.lingbo.ojcodesandbox.model.ExecuteCodeResponse;
 import com.lingbo.ojcodesandbox.model.ExecuteMessage;
-import org.springframework.stereotype.Component;
+import com.lingbo.ojcodesandbox.model.JudgeInfo;
+import com.lingbo.ojcodesandbox.utils.ProcessUtils;
 import org.springframework.util.StopWatch;
 
 import java.io.Closeable;
@@ -21,18 +24,21 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
-@Component
-public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
+public class JavaDockerCodeSandboxOld implements CodeSandbox {
 
+    private static final String GLOBAL_CODE_DIR_NAME = "tmpCode";
+
+    private static final String GLOBAL_JAVA_CLASS_NAME = "Main.java";
 
     private static final Long TIME_OUT = 10000L;
 
     private static Boolean FIRST_INIT = true;
 
     public static void main(String[] args) {
-        JavaDockerCodeSandbox codeSandbox = new JavaDockerCodeSandbox();
+        JavaDockerCodeSandboxOld codeSandbox = new JavaDockerCodeSandboxOld();
         String code = ResourceUtil.readStr("testcode/simpleComputeArgs/Main.java", StandardCharsets.UTF_8);
 
         ExecuteCodeRequest executeCodeRequest = new ExecuteCodeRequest();
@@ -43,15 +49,40 @@ public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
         System.out.println(executeCodeResponse);
     }
 
-    /**
-     * 3.创建容器，上传编译文件，容器内执行程序
-     * @param userCodeFile 用户代码文件
-     * @param inputList 输入列表
-     * @return
-     */
     @Override
-    public List<ExecuteMessage> runFile(File userCodeFile, List<String> inputList) {
-        String userCodeSaveParentPath = userCodeFile.getParentFile().getAbsolutePath();
+    public ExecuteCodeResponse executeCode(ExecuteCodeRequest executeCodeRequest) {
+
+
+
+        // 1. 保存用户代码文件
+        String code = executeCodeRequest.getCode();
+        List<String> inputList = executeCodeRequest.getInputList();
+
+
+        String userDir = System.getProperty("user.dir");
+        String globalCodeSavePath = userDir + File.separator + GLOBAL_CODE_DIR_NAME;
+        // 判断保存代码路径是否存在
+        if (!FileUtil.exist(globalCodeSavePath)) {
+            // 若不存在，则新建目录
+            FileUtil.mkdir(globalCodeSavePath);
+        }
+        // 把用户代码隔离存放
+        String userCodeSaveParentPath = globalCodeSavePath + File.separator + UUID.randomUUID().toString();
+        String userCodeSavePath = userCodeSaveParentPath + File.separator + GLOBAL_JAVA_CLASS_NAME;
+        // 将传入的代码写进Main.java文件
+        File userCodeFile = FileUtil.writeString(code, userCodeSavePath, StandardCharsets.UTF_8);
+
+        // 2.编译代码
+        String compileCmd = String.format("javac -encoding utf-8 %s", userCodeFile.getAbsolutePath());
+        try {
+            Process compileProcess = Runtime.getRuntime().exec(compileCmd);
+            ExecuteMessage executeMessage = ProcessUtils.runProcessAndGetMessage(compileProcess, "编译");
+            System.out.println(executeMessage);
+        } catch (IOException e) {
+            return getErrorResponse(e);
+        }
+
+        // 3. 创建容器，上传编译文件
         // 获取默认的 Docker Client
         DockerClient dockerClient = DockerClientBuilder.getInstance().build();
 
@@ -204,9 +235,54 @@ public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
             executeMessage.setMessage(message[0]);
             executeMessageList.add(executeMessage);
         }
-        return executeMessageList;
+
+        // 4.整理输出
+
+        ExecuteCodeResponse executeCodeResponse = new ExecuteCodeResponse();
+        List<String> outputList = new ArrayList<>();
+        for (ExecuteMessage executeMessage : executeMessageList) {
+            String message = executeMessage.getMessage();
+            String errorMessage = executeMessage.getErrorMessage();
+            if (StrUtil.isNotBlank(errorMessage)) {
+                executeCodeResponse.setMessage(executeMessage.getErrorMessage());
+                // 执行中存在错误
+                executeCodeResponse.setStatus(3);
+                break;
+            }
+            outputList.add(message);
+        }
+        // 正常运行完成
+        if (outputList.size() == executeMessageList.size()) {
+            executeCodeResponse.setStatus(1);
+        }
+        executeCodeResponse.setOutputList(outputList);
+        JudgeInfo judgeInfo = new JudgeInfo();
+        judgeInfo.setTime(maxTime);
+
+        executeCodeResponse.setJudgeInfo(judgeInfo);
+
+        // 5、文件清理
+        if (userCodeFile.getParentFile() != null) {
+            boolean del = FileUtil.del(userCodeSaveParentPath);
+            System.out.println("删除" + (del ? "成功" : "失败"));
+        }
+
+        return executeCodeResponse;
     }
 
-
-
+    /**
+     * 获取错误响应
+     *
+     * @param e
+     * @return
+     */
+    private ExecuteCodeResponse getErrorResponse(Throwable e) {
+        ExecuteCodeResponse executeCodeResponse = new ExecuteCodeResponse();
+        executeCodeResponse.setOutputList(new ArrayList<>());
+        executeCodeResponse.setMessage(e.getMessage());
+        // 表示代码沙箱错误
+        executeCodeResponse.setStatus(2);
+        executeCodeResponse.setJudgeInfo(new JudgeInfo());
+        return executeCodeResponse;
+    }
 }
