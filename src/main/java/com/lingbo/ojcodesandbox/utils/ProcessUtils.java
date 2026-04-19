@@ -6,6 +6,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.util.StopWatch;
 
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -30,6 +31,7 @@ public class ProcessUtils {
             // 等待程序执行，获取错误码
             int exitValue = runProcess.waitFor();
             executeMessage.setExitCode(exitValue);
+
             // 正常退出，退出码为0
             if (exitValue == 0) {
                 System.out.println(opName + "成功！");
@@ -83,40 +85,65 @@ public class ProcessUtils {
      * 执行交互式进程并获取信息
      *
      * @param runProcess
-     * @param args
+     * @param input
      * @return
      */
-    public static ExecuteMessage runInteractProcessAndGetMessage(Process runProcess, String args) {
+    public static ExecuteMessage runInteractProcessAndGetMessage(Process runProcess, String input) {
         ExecuteMessage executeMessage = new ExecuteMessage();
+        StopWatch stopWatch = new StopWatch();
 
         try {
-            // 向控制台输入程序
-            OutputStream outputStream = runProcess.getOutputStream();
-            OutputStreamWriter outputStreamWriter = new OutputStreamWriter(outputStream);
-            String[] s = args.split(" ");
-            String join = StrUtil.join("\n", s) + "\n";
-            outputStreamWriter.write(join);
-            // 相当于按了回车，执行输入的发送
-            outputStreamWriter.flush();
+            stopWatch.start();
 
-            // 分批获取进程的正常输出
-            InputStream inputStream = runProcess.getInputStream();
-            BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(inputStream));
-            StringBuilder compileOutputStringBuilder = new StringBuilder();
-            // 逐行读取
-            String compileOutputLine;
-            while ((compileOutputLine = bufferedReader.readLine()) != null) {
-                compileOutputStringBuilder.append(compileOutputLine);
+            // 1. 写入标准输入
+            try (BufferedWriter writer = new BufferedWriter(
+                    new OutputStreamWriter(runProcess.getOutputStream(), StandardCharsets.UTF_8))) {
+                writer.write(input);
+                writer.flush();
+                // try-with-resources 结束后自动 close，向子进程发送 EOF
             }
-            executeMessage.setMessage(compileOutputStringBuilder.toString());
-            // 记得资源的释放，否则会卡死
-            outputStreamWriter.close();
-            outputStream.close();
-            inputStream.close();
-            runProcess.destroy();
+
+            // 2. 等待执行结束
+            int exitValue = runProcess.waitFor();
+            executeMessage.setExitCode(exitValue);
+
+            // 3. 读取标准输出
+            StringBuilder outputBuilder = new StringBuilder();
+            try (BufferedReader bufferedReader = new BufferedReader(
+                    new InputStreamReader(runProcess.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = bufferedReader.readLine()) != null) {
+                    outputBuilder.append(line).append("\n");
+                }
+            }
+            executeMessage.setMessage(outputBuilder.toString().trim());
+
+            // 4. 读取错误输出
+            StringBuilder errorBuilder = new StringBuilder();
+            try (BufferedReader errorBufferedReader = new BufferedReader(
+                    new InputStreamReader(runProcess.getErrorStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = errorBufferedReader.readLine()) != null) {
+                    errorBuilder.append(line).append("\n");
+                }
+            }
+            executeMessage.setErrorMessage(errorBuilder.toString().trim());
+
+            if (exitValue == 0) {
+                System.out.println("运行成功！");
+            } else {
+                System.out.println("运行失败，错误码：" + exitValue);
+            }
+
         } catch (Exception e) {
             e.printStackTrace();
+            executeMessage.setErrorMessage(e.getMessage());
+        } finally {
+            stopWatch.stop();
+            executeMessage.setTime(stopWatch.getTotalTimeMillis());
+            runProcess.destroy();
         }
+
         return executeMessage;
     }
 

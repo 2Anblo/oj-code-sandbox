@@ -1,7 +1,6 @@
 package com.lingbo.ojcodesandbox;
 
 import cn.hutool.core.io.resource.ResourceUtil;
-import cn.hutool.core.util.ArrayUtil;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.*;
@@ -14,6 +13,7 @@ import com.lingbo.ojcodesandbox.model.ExecuteMessage;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StopWatch;
 
+import java.io.ByteArrayInputStream;
 import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
@@ -93,7 +93,7 @@ public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
                 .withReadonlyRootfs(true)
                 .withAttachStderr(true)
                 .withAttachStdin(true)
-                .withTty(true)
+                .withTty(false)
                 .exec();
         System.out.println(createContainerResponse);
         String containerId = createContainerResponse.getId();
@@ -116,8 +116,8 @@ public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
             ExecuteMessage executeMessage = new ExecuteMessage();
             long time = 0L;
 
-            final String[] message = {null};
-            final String[] errorMessage = {null};
+            StringBuilder messageBuilder = new StringBuilder();
+            StringBuilder errorMessageBuilder = new StringBuilder();
             final long[] maxMemory = {0L};
 
             StopWatch stopWatch = new StopWatch();
@@ -151,8 +151,7 @@ public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
                         }
                     }
             );
-            String[] inputArray = inputArgs.split(" ");
-            String [] cmdArray = ArrayUtil.append(new String[] {"java","-cp","/app","Main"} , inputArray);
+            String[] cmdArray = new String[]{"java", "-cp", "/app", "Main"};
             ExecCreateCmdResponse cmdResponse = dockerClient.execCreateCmd(containerId)
                     .withCmd(cmdArray)
                     .withAttachStdin(true)
@@ -160,27 +159,15 @@ public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
                     .withAttachStderr(true)
                     .exec();
             String execId = cmdResponse.getId();
-            final boolean[] isTimeOut = {true};
             ExecStartResultCallback execStartResultCallback = new ExecStartResultCallback() {
-                @Override
-                public void onComplete() {
-                    super.onComplete();
-                    // 若程序执行完毕，则说明未超时
-                    isTimeOut[0] = false;
-                }
-
                 @Override
                 public void onNext(Frame frame) {
                     StreamType streamType = frame.getStreamType();
 
                     if (StreamType.STDERR.equals(streamType)) {
-                        errorMessage[0] = new String(frame.getPayload());
-
-                        System.out.println("输出错误结果："+ errorMessage[0]);
+                        errorMessageBuilder.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
                     }  else {
-                        message[0] = new String(frame.getPayload());
-
-                        System.out.println("输出结果"+ message[0]);
+                        messageBuilder.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
                     }
 
                     super.onNext(frame);
@@ -188,7 +175,8 @@ public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
             };
             try {
                 stopWatch.start();
-                dockerClient.execStartCmd(execId)
+                boolean completed = dockerClient.execStartCmd(execId)
+                        .withStdIn(new ByteArrayInputStream((inputArgs == null ? "" : inputArgs).getBytes(StandardCharsets.UTF_8)))
                         .exec(execStartResultCallback)
                         .awaitCompletion(TIME_OUT, TimeUnit.MILLISECONDS);
                 stopWatch.stop();
@@ -196,12 +184,23 @@ public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
                 executeMessage.setTime(time);
                 maxTime = Math.max(time,maxTime);
                 statsCmd.close();
+                if (!completed) {
+                    executeMessage.setErrorMessage("执行超时");
+                } else {
+                    executeMessage.setErrorMessage(errorMessageBuilder.toString().trim());
+                }
             } catch (InterruptedException e) {
                 System.out.println("程序执行异常");
                 throw new RuntimeException(e);
             }
-            executeMessage.setErrorMessage(errorMessage[0]);
-            executeMessage.setMessage(message[0]);
+            try {
+                InspectExecResponse inspectExecResponse = dockerClient.inspectExecCmd(execId).exec();
+                if (inspectExecResponse != null && inspectExecResponse.getExitCodeLong() != null) {
+                    executeMessage.setExitCode(inspectExecResponse.getExitCodeLong().intValue());
+                }
+            } catch (Exception ignored) {
+            }
+            executeMessage.setMessage(messageBuilder.toString().trim());
             executeMessageList.add(executeMessage);
         }
         return executeMessageList;

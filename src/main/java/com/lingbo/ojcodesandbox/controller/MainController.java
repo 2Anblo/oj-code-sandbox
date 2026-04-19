@@ -1,5 +1,6 @@
 package com.lingbo.ojcodesandbox.controller;
 
+import com.lingbo.ojcodesandbox.CppDockerCodeSandbox;
 import com.lingbo.ojcodesandbox.JavaNativeCodeSandbox;
 import com.lingbo.ojcodesandbox.model.ExecuteCodeRequest;
 import com.lingbo.ojcodesandbox.model.ExecuteCodeResponse;
@@ -21,6 +22,9 @@ public class MainController {
 
     @Resource
     private JavaNativeCodeSandbox javaNativeCodeSandbox;
+
+    @Resource
+    private CppDockerCodeSandbox cppDockerCodeSandbox;
 
     /**
      * 执行代码
@@ -46,8 +50,14 @@ public class MainController {
             throw new RuntimeException("请求参数为空！");
         }
 
-        ExecuteCodeResponse executeCodeResponse = javaNativeCodeSandbox.executeCode(executeCodeRequest);
-        return executeCodeResponse;
+        String language = executeCodeRequest.getLanguage();
+        if ("java".equalsIgnoreCase(language)) {
+            return javaNativeCodeSandbox.executeCode(executeCodeRequest);
+        }
+        if ("cpp".equalsIgnoreCase(language) || "c++".equalsIgnoreCase(language)) {
+            return cppDockerCodeSandbox.executeCode(executeCodeRequest);
+        }
+        throw new RuntimeException("暂不支持语言：" + language);
     }
 
 

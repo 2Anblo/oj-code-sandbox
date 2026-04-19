@@ -28,7 +28,7 @@ public class JavaCodeSandboxTemplate implements CodeSandbox{
 
     private static final String GLOBAL_JAVA_CLASS_NAME = "Main.java";
 
-    private static final Long TIME_OUT = 10000L;
+    private static final Long TIME_OUT = 12000L;
 
     /**
      * 1. 保存用户代码文件
@@ -63,13 +63,12 @@ public class JavaCodeSandboxTemplate implements CodeSandbox{
             Process compileProcess = Runtime.getRuntime().exec(compileCmd);
             ExecuteMessage executeMessage = ProcessUtils.runProcessAndGetMessage(compileProcess, "编译");
 
-            if (executeMessage.getExitCode()!=0){
-                throw new RuntimeException("编译错误");
-            }
             return executeMessage;
         } catch (IOException e) {
-//            return getErrorResponse(e);
-            throw new RuntimeException(e);
+            ExecuteMessage errorMessage = new ExecuteMessage();
+            errorMessage.setErrorMessage(e.getMessage());
+            errorMessage.setExitCode(-1);
+            return errorMessage;
         }
     }
 
@@ -85,7 +84,10 @@ public class JavaCodeSandboxTemplate implements CodeSandbox{
 
         for (String inputArgs : inputList) {
 
-            String runCmd = String.format("java -Xmx256m -Dfile.encoding=UTF-8 -cp %s Main %s", userCodeSaveParentPath, inputArgs);
+            // 使用参数模式
+            // String runCmd = String.format("java -Xmx256m -Dfile.encoding=UTF-8 -cp %s Main %s", userCodeSaveParentPath, inputArgs);
+            // 使用ACM标准输入输出模式
+            String runCmd = String.format("java -Xmx256m -Dfile.encoding=UTF-8 -cp %s Main", userCodeSaveParentPath);
             try {
                 Process runProcess = Runtime.getRuntime().exec(runCmd);
                 // 超时控制
@@ -98,7 +100,10 @@ public class JavaCodeSandboxTemplate implements CodeSandbox{
                         throw new RuntimeException(e);
                     }
                 }).start();
-                ExecuteMessage executeMessage = ProcessUtils.runProcessAndGetMessage(runProcess, "运行");
+                // 使用参数模式
+                // ExecuteMessage executeMessage = ProcessUtils.runProcessAndGetMessage(runProcess, "运行");
+                // 使用ACM标准输入输出模式
+                ExecuteMessage executeMessage = ProcessUtils.runInteractProcessAndGetMessage(runProcess, inputArgs);
                 System.out.println(executeMessage);
                 executeMessageList.add(executeMessage);
 
@@ -170,13 +175,27 @@ public class JavaCodeSandboxTemplate implements CodeSandbox{
 
         String code = executeCodeRequest.getCode();
         List<String> inputList = executeCodeRequest.getInputList();
+        if (inputList == null) {
+            inputList = new ArrayList<>();
+        }
 
 
         // 1. 保存用户代码文件
         File userCodeFile = saveCodeToFile(code);
         // 2. 编译代码
         ExecuteMessage compileFileExecuteMessage = compileFile(userCodeFile);
-        System.out.println(compileFileExecuteMessage);
+        if (compileFileExecuteMessage.getExitCode() != 0) {
+            ExecuteCodeResponse errorResponse = new ExecuteCodeResponse();
+            errorResponse.setOutputList(new ArrayList<>());
+            errorResponse.setMessage(compileFileExecuteMessage.getErrorMessage());
+            errorResponse.setStatus(3); // 3 = 编译/运行错误
+            errorResponse.setJudgeInfo(new JudgeInfo());
+
+            // 删除文件
+            deleteFile(userCodeFile);
+
+            return errorResponse;
+        }
 
         // 3.执行代码，得到输出结果
         List<ExecuteMessage> executeMessageList = runFile(userCodeFile, inputList);
