@@ -5,11 +5,11 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.*;
 import com.github.dockerjava.api.model.*;
-import com.github.dockerjava.core.DockerClientBuilder;
 import com.github.dockerjava.core.command.ExecStartResultCallback;
 import com.lingbo.ojcodesandbox.model.ExecuteCodeRequest;
 import com.lingbo.ojcodesandbox.model.ExecuteCodeResponse;
 import com.lingbo.ojcodesandbox.model.ExecuteMessage;
+import com.lingbo.ojcodesandbox.utils.DockerClientUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StopWatch;
 
@@ -31,18 +31,6 @@ public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
 
     private static Boolean FIRST_INIT = true;
 
-    public static void main(String[] args) {
-        JavaDockerCodeSandbox codeSandbox = new JavaDockerCodeSandbox();
-        String code = ResourceUtil.readStr("testcode/simpleComputeArgs/Main.java", StandardCharsets.UTF_8);
-
-        ExecuteCodeRequest executeCodeRequest = new ExecuteCodeRequest();
-        executeCodeRequest.setCode(code);
-        executeCodeRequest.setInputList(Arrays.asList("1 2","2 3"));
-        executeCodeRequest.setLanguage("java");
-        ExecuteCodeResponse executeCodeResponse = codeSandbox.executeCode(executeCodeRequest);
-        System.out.println(executeCodeResponse);
-    }
-
     /**
      * 3.创建容器，上传编译文件，容器内执行程序
      * @param userCodeFile 用户代码文件
@@ -53,7 +41,7 @@ public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
     public List<ExecuteMessage> runFile(File userCodeFile, List<String> inputList) {
         String userCodeSaveParentPath = userCodeFile.getParentFile().getAbsolutePath();
         // 获取默认的 Docker Client
-        DockerClient dockerClient = DockerClientBuilder.getInstance().build();
+        DockerClient dockerClient = DockerClientUtils.getClient();
 
         // 拉取镜像
         String image = "openjdk:8-alpine";
@@ -94,116 +82,196 @@ public class JavaDockerCodeSandbox extends JavaCodeSandboxTemplate {
                 .withAttachStderr(true)
                 .withAttachStdin(true)
                 .withTty(false)
+                .withCmd("sh", "-c", "tail -f /dev/null")
                 .exec();
         System.out.println(createContainerResponse);
         String containerId = createContainerResponse.getId();
 
-        // 获取容器列表，查看容器状态
-        ListContainersCmd listContainersCmd = dockerClient.listContainersCmd();
-        List<Container> containerList = listContainersCmd.withShowAll(true).exec();
-        for (Container container : containerList) {
-            System.out.println(container);
-        }
-
         // 启动容器
         dockerClient.startContainerCmd(containerId).exec();
         List<ExecuteMessage> executeMessageList = new ArrayList<>();
-        // 执行代码，并获取结果
-        // docker exec keen_blackwell java -cp /app Main 1 3
-        // 取运行时间的最大值用于判断是否超时
-        long maxTime = 0;
-        for (String inputArgs : inputList) {
-            ExecuteMessage executeMessage = new ExecuteMessage();
-            long time = 0L;
+        try {
+            for (String inputArgs : inputList) {
+                ExecuteMessage executeMessage = runOnceInContainer(dockerClient, containerId, inputArgs);
+                executeMessageList.add(executeMessage);
+            }
+        } finally {
+            try {
+                dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+            } catch (Exception ignored) {
+            }
+        }
+        return executeMessageList;
+    }
 
-            StringBuilder messageBuilder = new StringBuilder();
-            StringBuilder errorMessageBuilder = new StringBuilder();
-            final long[] maxMemory = {0L};
+    private ExecuteMessage runOnceInContainer(DockerClient dockerClient, String containerId, String stdin) {
+        ExecuteMessage executeMessage = new ExecuteMessage();
+        StringBuilder messageBuilder = new StringBuilder();
+        StringBuilder errorMessageBuilder = new StringBuilder();
+        final long[] maxMemoryBytes = {0L};
 
-            StopWatch stopWatch = new StopWatch();
-            StatsCmd statsCmd = dockerClient.statsCmd(containerId);
-            ResultCallback<Statistics> statisticsResultCallback = statsCmd.exec(
+        StopWatch stopWatch = new StopWatch();
+        StatsCmd statsCmd = null;
+        ResultCallback<Statistics> statisticsResultCallback = null;
+        ExecStartResultCallback execStartResultCallback = null;
+
+        String[] cmdArray = new String[]{"java", "-cp", "/app", "Main"};
+        ExecCreateCmdResponse cmdResponse = dockerClient.execCreateCmd(containerId)
+                .withCmd(cmdArray)
+                .withAttachStdin(true)
+                .withAttachStdout(true)
+                .withAttachStderr(true)
+                .exec();
+        String execId = cmdResponse.getId();
+
+        boolean timeout = false;
+        boolean completed = false;
+        try {
+            statsCmd = dockerClient.statsCmd(containerId);
+            statisticsResultCallback = statsCmd.exec(
                     new ResultCallback<Statistics>() {
                         @Override
                         public void onNext(Statistics statistics) {
-                            System.out.println("内存占用：" + statistics.getMemoryStats().getUsage() );
-                            maxMemory[0] = Math.max(statistics.getMemoryStats().getUsage(), maxMemory[0]);
+                            if (statistics == null || statistics.getMemoryStats() == null || statistics.getMemoryStats().getUsage() == null) {
+                                return;
+                            }
+                            maxMemoryBytes[0] = Math.max(statistics.getMemoryStats().getUsage(), maxMemoryBytes[0]);
                         }
 
                         @Override
                         public void close() throws IOException {
-
                         }
 
                         @Override
                         public void onStart(Closeable closeable) {
-
                         }
 
                         @Override
                         public void onError(Throwable throwable) {
-
                         }
 
                         @Override
                         public void onComplete() {
-
                         }
                     }
             );
-            String[] cmdArray = new String[]{"java", "-cp", "/app", "Main"};
-            ExecCreateCmdResponse cmdResponse = dockerClient.execCreateCmd(containerId)
-                    .withCmd(cmdArray)
-                    .withAttachStdin(true)
-                    .withAttachStdout(true)
-                    .withAttachStderr(true)
-                    .exec();
-            String execId = cmdResponse.getId();
-            ExecStartResultCallback execStartResultCallback = new ExecStartResultCallback() {
+
+            execStartResultCallback = new ExecStartResultCallback() {
                 @Override
                 public void onNext(Frame frame) {
                     StreamType streamType = frame.getStreamType();
-
                     if (StreamType.STDERR.equals(streamType)) {
                         errorMessageBuilder.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
-                    }  else {
+                    } else {
                         messageBuilder.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
                     }
-
                     super.onNext(frame);
                 }
             };
-            try {
-                stopWatch.start();
-                boolean completed = dockerClient.execStartCmd(execId)
-                        .withStdIn(new ByteArrayInputStream((inputArgs == null ? "" : inputArgs).getBytes(StandardCharsets.UTF_8)))
-                        .exec(execStartResultCallback)
-                        .awaitCompletion(TIME_OUT, TimeUnit.MILLISECONDS);
-                stopWatch.stop();
-                time = stopWatch.getLastTaskTimeMillis();
-                executeMessage.setTime(time);
-                maxTime = Math.max(time,maxTime);
-                statsCmd.close();
-                if (!completed) {
-                    executeMessage.setErrorMessage("执行超时");
-                } else {
-                    executeMessage.setErrorMessage(errorMessageBuilder.toString().trim());
-                }
-            } catch (InterruptedException e) {
-                System.out.println("程序执行异常");
-                throw new RuntimeException(e);
+
+            stopWatch.start();
+            String stdinToUse = stdin == null ? "" : stdin;
+            if (!stdinToUse.isEmpty() && !stdinToUse.endsWith("\n")) {
+                stdinToUse = stdinToUse + "\n";
             }
-            try {
+            dockerClient.execStartCmd(execId)
+                    .withStdIn(new ByteArrayInputStream(stdinToUse.getBytes(StandardCharsets.UTF_8)))
+                    .exec(execStartResultCallback);
+
+            long startTime = System.currentTimeMillis();
+            while (true) {
                 InspectExecResponse inspectExecResponse = dockerClient.inspectExecCmd(execId).exec();
-                if (inspectExecResponse != null && inspectExecResponse.getExitCodeLong() != null) {
-                    executeMessage.setExitCode(inspectExecResponse.getExitCodeLong().intValue());
+                Boolean running = getRunningFlag(inspectExecResponse);
+                if (running == null) {
+                    Long exitCodeLong = null;
+                    try {
+                        exitCodeLong = inspectExecResponse == null ? null : inspectExecResponse.getExitCodeLong();
+                    } catch (Throwable ignored) {
+                    }
+                    running = exitCodeLong == null;
                 }
-            } catch (Exception ignored) {
+                if (!Boolean.TRUE.equals(running)) {
+                    completed = true;
+                    break;
+                }
+                if (System.currentTimeMillis() - startTime > TIME_OUT) {
+                    timeout = true;
+                    break;
+                }
+                Thread.sleep(30);
             }
-            executeMessage.setMessage(messageBuilder.toString().trim());
-            executeMessageList.add(executeMessage);
+            stopWatch.stop();
+        } catch (InterruptedException e) {
+            errorMessageBuilder.append(e.getMessage());
+        } finally {
+            if (statsCmd != null) {
+                try {
+                    statsCmd.close();
+                } catch (Exception ignored) {
+                }
+            }
+            if (statisticsResultCallback != null) {
+                try {
+                    statisticsResultCallback.close();
+                } catch (Exception ignored) {
+                }
+            }
+            if (execStartResultCallback != null) {
+                try {
+                    execStartResultCallback.awaitCompletion(1, TimeUnit.SECONDS);
+                } catch (InterruptedException ignored) {
+                }
+                try {
+                    execStartResultCallback.close();
+                } catch (Exception ignored) {
+                }
+            }
         }
-        return executeMessageList;
+
+        Integer exitCode = null;
+        try {
+            InspectExecResponse inspectExecResponse = dockerClient.inspectExecCmd(execId).exec();
+            if (inspectExecResponse != null && inspectExecResponse.getExitCodeLong() != null) {
+                exitCode = inspectExecResponse.getExitCodeLong().intValue();
+            }
+        } catch (Exception ignored) {
+        }
+
+        executeMessage.setExitCode(exitCode);
+        executeMessage.setTime(stopWatch.getLastTaskTimeMillis());
+        if (maxMemoryBytes[0] > 0) {
+            executeMessage.setMemory(maxMemoryBytes[0] / 1024 / 1024);
+        }
+        executeMessage.setMessage(messageBuilder.toString().trim());
+        if (timeout || !completed) {
+            executeMessage.setErrorMessage("执行超时");
+        } else {
+            executeMessage.setErrorMessage(errorMessageBuilder.toString().trim());
+        }
+        return executeMessage;
+    }
+
+    private Boolean getRunningFlag(InspectExecResponse inspectExecResponse) {
+        if (inspectExecResponse == null) {
+            return null;
+        }
+        try {
+            java.lang.reflect.Method method = inspectExecResponse.getClass().getMethod("getRunning");
+            Object value = method.invoke(inspectExecResponse);
+            if (value instanceof Boolean) {
+                return (Boolean) value;
+            }
+        } catch (Exception ignored) {
+        }
+        try {
+            java.lang.reflect.Method method = inspectExecResponse.getClass().getMethod("isRunning");
+            Object value = method.invoke(inspectExecResponse);
+            if (value instanceof Boolean) {
+                return (Boolean) value;
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
     }
 
 

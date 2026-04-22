@@ -125,6 +125,7 @@ public class JavaCodeSandboxTemplate implements CodeSandbox{
     public ExecuteCodeResponse getOutputResponse(List<ExecuteMessage> executeMessageList){
         // 取运行时间的最大值用于判断是否超时
         long maxTime = 0;
+        long maxMemory = 0;
         ExecuteCodeResponse executeCodeResponse = new ExecuteCodeResponse();
         List<String> outputList = new ArrayList<>();
         for (ExecuteMessage executeMessage : executeMessageList) {
@@ -133,6 +134,10 @@ public class JavaCodeSandboxTemplate implements CodeSandbox{
             Long time = executeMessage.getTime();
             if (time != null) {
                 maxTime = Math.max(maxTime, time);
+            }
+            Long memory = executeMessage.getMemory();
+            if (memory != null) {
+                maxMemory = Math.max(maxMemory, memory);
             }
             if (StrUtil.isNotBlank(errorMessage)) {
                 executeCodeResponse.setMessage(executeMessage.getErrorMessage());
@@ -149,6 +154,9 @@ public class JavaCodeSandboxTemplate implements CodeSandbox{
         executeCodeResponse.setOutputList(outputList);
         JudgeInfo judgeInfo = new JudgeInfo();
         judgeInfo.setTime(maxTime);
+        if (maxMemory > 0) {
+            judgeInfo.setMemory(maxMemory);
+        }
 
         executeCodeResponse.setJudgeInfo(judgeInfo);
         return executeCodeResponse;

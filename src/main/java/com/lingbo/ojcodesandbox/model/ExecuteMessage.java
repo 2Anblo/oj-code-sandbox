@@ -12,4 +12,9 @@ public class ExecuteMessage {
     private Integer exitCode;
 
     private Long time;
+
+    /**
+     * 峰值内存（MB）
+     */
+    private Long memory;
 }

@@ -1,9 +1,11 @@
 package com.lingbo.ojcodesandbox.controller;
 
 import com.lingbo.ojcodesandbox.CppDockerCodeSandbox;
+import com.lingbo.ojcodesandbox.JavaDockerCodeSandbox;
 import com.lingbo.ojcodesandbox.JavaNativeCodeSandbox;
 import com.lingbo.ojcodesandbox.model.ExecuteCodeRequest;
 import com.lingbo.ojcodesandbox.model.ExecuteCodeResponse;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
@@ -25,6 +27,8 @@ public class MainController {
 
     @Resource
     private CppDockerCodeSandbox cppDockerCodeSandbox;
+    @Autowired
+    private JavaDockerCodeSandbox javaDockerCodeSandbox;
 
     /**
      * 执行代码
@@ -52,7 +56,7 @@ public class MainController {
 
         String language = executeCodeRequest.getLanguage();
         if ("java".equalsIgnoreCase(language)) {
-            return javaNativeCodeSandbox.executeCode(executeCodeRequest);
+            return javaDockerCodeSandbox.executeCode(executeCodeRequest);
         }
         if ("cpp".equalsIgnoreCase(language) || "c++".equalsIgnoreCase(language)) {
             return cppDockerCodeSandbox.executeCode(executeCodeRequest);

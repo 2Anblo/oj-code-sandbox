@@ -3,6 +3,7 @@ package com.lingbo.ojcodesandbox;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
@@ -13,6 +14,7 @@ import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.PullResponseItem;
+import com.github.dockerjava.api.model.Statistics;
 import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.api.model.Volume;
 import com.github.dockerjava.core.command.ExecStartResultCallback;
@@ -25,7 +27,9 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StopWatch;
 
 import java.io.ByteArrayInputStream;
+import java.io.Closeable;
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -201,12 +205,42 @@ public class CppDockerCodeSandbox implements CodeSandbox {
 
         boolean completed = false;
         boolean timeout = false;
+        final long[] maxMemoryBytes = {0L};
+        com.github.dockerjava.api.command.StatsCmd statsCmd = null;
+        ResultCallback<Statistics> statsCallback = null;
         try {
             stopWatch.start();
             String stdinToUse = stdin == null ? "" : stdin;
             if (StrUtil.isNotEmpty(stdinToUse) && !stdinToUse.endsWith("\n")) {
                 stdinToUse = stdinToUse + "\n";
             }
+            statsCmd = dockerClient.statsCmd(containerId);
+            statsCallback = statsCmd.exec(new ResultCallback<Statistics>() {
+                @Override
+                public void onNext(Statistics statistics) {
+                    if (statistics != null
+                            && statistics.getMemoryStats() != null
+                            && statistics.getMemoryStats().getUsage() != null) {
+                        maxMemoryBytes[0] = Math.max(maxMemoryBytes[0], statistics.getMemoryStats().getUsage());
+                    }
+                }
+
+                @Override
+                public void close() throws IOException {
+                }
+
+                @Override
+                public void onStart(Closeable closeable) {
+                }
+
+                @Override
+                public void onError(Throwable throwable) {
+                }
+
+                @Override
+                public void onComplete() {
+                }
+            });
             ByteArrayInputStream stdinStream = new ByteArrayInputStream(stdinToUse.getBytes(StandardCharsets.UTF_8));
             dockerClient.execStartCmd(execId)
                     .withStdIn(stdinStream)
@@ -238,6 +272,18 @@ public class CppDockerCodeSandbox implements CodeSandbox {
         } catch (InterruptedException e) {
             errorMessageBuilder.append(e.getMessage());
         } finally {
+            if (statsCmd != null) {
+                try {
+                    statsCmd.close();
+                } catch (Exception ignored) {
+                }
+            }
+            if (statsCallback != null) {
+                try {
+                    statsCallback.close();
+                } catch (Exception ignored) {
+                }
+            }
             try {
                 execStartResultCallback.awaitCompletion(1, TimeUnit.SECONDS);
             } catch (InterruptedException ignored) {
@@ -259,6 +305,9 @@ public class CppDockerCodeSandbox implements CodeSandbox {
 
         executeMessage.setExitCode(exitCode);
         executeMessage.setTime(stopWatch.getLastTaskTimeMillis());
+        if (maxMemoryBytes[0] > 0) {
+            executeMessage.setMemory(maxMemoryBytes[0] / 1024 / 1024);
+        }
         executeMessage.setMessage(messageBuilder.toString());
         if (timeout || !completed) {
             executeMessage.setErrorMessage("执行超时");
@@ -295,6 +344,7 @@ public class CppDockerCodeSandbox implements CodeSandbox {
 
     private ExecuteCodeResponse getOutputResponse(List<ExecuteMessage> executeMessageList) {
         long maxTime = 0;
+        long maxMemory = 0;
         ExecuteCodeResponse executeCodeResponse = new ExecuteCodeResponse();
         List<String> outputList = new ArrayList<>();
         for (ExecuteMessage executeMessage : executeMessageList) {
@@ -303,6 +353,10 @@ public class CppDockerCodeSandbox implements CodeSandbox {
             Long time = executeMessage.getTime();
             if (time != null) {
                 maxTime = Math.max(maxTime, time);
+            }
+            Long memory = executeMessage.getMemory();
+            if (memory != null) {
+                maxMemory = Math.max(maxMemory, memory);
             }
             if (StrUtil.isNotBlank(errorMessage)) {
                 executeCodeResponse.setMessage(errorMessage);
@@ -317,6 +371,9 @@ public class CppDockerCodeSandbox implements CodeSandbox {
         executeCodeResponse.setOutputList(outputList);
         JudgeInfo judgeInfo = new JudgeInfo();
         judgeInfo.setTime(maxTime);
+        if (maxMemory > 0) {
+            judgeInfo.setMemory(maxMemory);
+        }
         executeCodeResponse.setJudgeInfo(judgeInfo);
         return executeCodeResponse;
     }
